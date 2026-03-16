@@ -251,24 +251,42 @@ function ClosedRow({ trade }) {
   );
 }
 
+// ── LOCALSTORAGE HELPERS ──────────────────────────────────────────────────────
+function load(key, fallback) {
+  try { const v = localStorage.getItem(key); return v ? JSON.parse(v) : fallback; }
+  catch { return fallback; }
+}
+function save(key, value) {
+  try { localStorage.setItem(key, JSON.stringify(value)); } catch {}
+}
+
 // ── MAIN APP ──────────────────────────────────────────────────────────────────
 export default function TradingScanner() {
   const [signals, setSignals] = useState([]);
-  const [openTrades, setOpenTrades] = useState([]);
-  const [closedTrades, setClosedTrades] = useState([]);
+  const [openTrades, setOpenTrades] = useState(() => load("pf_open_trades", []));
+  const [closedTrades, setClosedTrades] = useState(() => load("pf_closed_trades", []));
   const [scanning, setScanning] = useState(false);
   const [progress, setProgress] = useState(0);
   const [total, setTotal] = useState(0);
   const [tab, setTab] = useState("signals");
-  const [entryZ, setEntryZ] = useState(2.0);
-  const [period, setPeriod] = useState("1y");
-  const [filterCoint, setFilterCoint] = useState(true);
-  const [useReal, setUseReal] = useState(false);
-  const [lastScanned, setLastScanned] = useState(null);
+  const [entryZ, setEntryZ] = useState(() => load("pf_entry_z", 2.0));
+  const [period, setPeriod] = useState(() => load("pf_period", "1y"));
+  const [filterCoint, setFilterCoint] = useState(() => load("pf_filter_coint", true));
+  const [useReal, setUseReal] = useState(() => load("pf_use_real", false));
+  const [lastScanned, setLastScanned] = useState(() => load("pf_last_scanned", null));
   const [autoScan, setAutoScan] = useState(false);
   const [sortBy, setSortBy] = useState("absZ");
   const scanRef = useRef(false);
   const autoRef = useRef(null);
+
+  // ── PERSIST TO LOCALSTORAGE ───────────────────────────────────────────────
+  useEffect(() => save("pf_open_trades", openTrades), [openTrades]);
+  useEffect(() => save("pf_closed_trades", closedTrades), [closedTrades]);
+  useEffect(() => save("pf_entry_z", entryZ), [entryZ]);
+  useEffect(() => save("pf_period", period), [period]);
+  useEffect(() => save("pf_filter_coint", filterCoint), [filterCoint]);
+  useEffect(() => save("pf_use_real", useReal), [useReal]);
+  useEffect(() => save("pf_last_scanned", lastScanned), [lastScanned]);
 
   // ── SCAN ENGINE ──────────────────────────────────────────────────────────────
   const runScan = useCallback(async () => {
