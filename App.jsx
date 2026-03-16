@@ -245,8 +245,22 @@ export default function App() {
           <Tag label="KALMAN FILTER" color={C.accent3} />
         </div>
         <div style={{ marginLeft: "auto", display: "flex", gap: 8, alignItems: "center" }}>
-          <Tag label={dataSource === "live" ? "● LIVE DATA" : "◎ SIMULATED"} color={dataSource === "live" ? C.long : C.muted} />
-        </div>
+  <Tag label={dataSource === "live" ? "● LIVE DATA" : "◎ SIMULATED"} color={dataSource === "live" ? C.long : C.muted} />
+  <a href="/watchlist" style={{
+    background: "linear-gradient(135deg, #003322, #005533)",
+    border: "1px solid #00ff8844",
+    color: "#00ff88",
+    borderRadius: 8,
+    padding: "7px 16px",
+    fontSize: 12,
+    fontFamily: "'Bebas Neue', sans-serif",
+    letterSpacing: "0.08em",
+    textDecoration: "none",
+    display: "flex",
+    alignItems: "center",
+    gap: 6,
+  }}>📡 WATCHLIST</a>
+</div>
       </header>
 
       <div style={{ display: "grid", gridTemplateColumns: "270px 1fr", minHeight: "calc(100vh - 58px)" }}>
