@@ -260,6 +260,20 @@ export default function App() {
     alignItems: "center",
     gap: 6,
   }}>📡 WATCHLIST</a>
+    <a href="/scanner" style={{
+  background: "linear-gradient(135deg, #1a0033, #330055)",
+  border: "1px solid #cc44ff44",
+  color: "#cc44ff",
+  borderRadius: 8,
+  padding: "7px 16px",
+  fontSize: 12,
+  fontFamily: "'Bebas Neue', sans-serif",
+  letterSpacing: "0.08em",
+  textDecoration: "none",
+  display: "flex",
+  alignItems: "center",
+  gap: 6,
+}}>🔍 SCANNER</a>
 </div>
       </header>
 
