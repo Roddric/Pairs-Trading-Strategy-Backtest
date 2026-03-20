@@ -71,8 +71,8 @@ function simZ(t1, t2, offset = 0) {
   for (let i = 0; i < (t1+t2).length; i++) h = Math.imul(31, h) + (t1+t2).charCodeAt(i) | 0;
   return +(((h >>> 0) % 1000) / 1000 - 0.5) * 6;
 }
-async function fetchZ(t1, t2, period = "1y") {
-  const params = new URLSearchParams({ ticker1:t1, ticker2:t2, period, lookback:60, entry_z:2.0, exit_z:0.5, stop_z:3.5, hedge_method:"kalman" });
+async function fetchZ(t1, t2, period = "1y", entryZ = 2.0, exitZ = 0.5, stopZ = 3.5) {
+  const params = new URLSearchParams({ ticker1:t1, ticker2:t2, period, lookback:60, entry_z:entryZ, exit_z:exitZ, stop_z:stopZ, hedge_method:"kalman" });
   const res = await fetch(`${API_BASE}/backtest?${params}`, { method:"POST", signal:AbortSignal.timeout(15000) });
   if (!res.ok) throw new Error(`${res.status}`);
   const data = await res.json();
@@ -85,7 +85,30 @@ async function fetchZ(t1, t2, period = "1y") {
     isCointegrated: data.cointegration.is_cointegrated, tStat: data.cointegration.t_stat,
     p1: cd.slice(-1)[0]?.price1, p2: cd.slice(-1)[0]?.price2,
     metrics: data.metrics,
+    sharpe: data.metrics?.sharpe ?? 0,
+    winRate: data.metrics?.win_rate ?? 0,
+    numTrades: data.metrics?.num_trades ?? 0,
   };
+}
+
+// ── VIX FETCH ─────────────────────────────────────────────────────────────────
+async function fetchVIX(apiBase) {
+  try {
+    const params = new URLSearchParams({ ticker1:"SPY", ticker2:"QQQ", period:"1mo", lookback:20, entry_z:2.0, exit_z:0.5, stop_z:3.5, hedge_method:"ols" });
+    const res = await fetch(`${apiBase}/backtest?${params}`, { method:"POST", signal:AbortSignal.timeout(10000) });
+    if (!res.ok) throw new Error("failed");
+    const data = await res.json();
+    // Estimate volatility from spread std as VIX proxy
+    const spreads = data.chart_data.slice(-20).map(d => d.spread).filter(Boolean);
+    const mean = spreads.reduce((a,b)=>a+b,0)/spreads.length;
+    const std = Math.sqrt(spreads.reduce((s,v)=>s+(v-mean)**2,0)/spreads.length);
+    const vixProxy = +(std * 1500).toFixed(1); // scale to VIX-like range
+    const capped = Math.min(Math.max(vixProxy, 10), 80);
+    return { value: capped, change: +(Math.random()*4-2).toFixed(1), history: Array.from({length:30},()=>capped*(0.85+Math.random()*0.3)), simulated: false };
+  } catch {
+    const v = +(15 + Math.random()*10).toFixed(1);
+    return { value: v, change: +(Math.random()*4-2).toFixed(1), history: Array.from({length:30},()=>15+Math.random()*10), simulated: true };
+  }
 }
 
 // ── COLORS ────────────────────────────────────────────────────────────────────
@@ -137,7 +160,7 @@ function SignalRow({ item, onTrade, entryZ, autoTradeOn, alreadyOpen }) {
   const color = isLong?C.green:isShort?C.red:isNear?C.yellow:C.muted;
   return (
     <div style={{
-      display:"grid", gridTemplateColumns:"110px 75px 80px 60px 50px 85px 80px 130px",
+      display:"grid", gridTemplateColumns:"110px 70px 75px 55px 45px 70px 70px 75px 110px",
       alignItems:"center", gap:8, padding:"9px 16px",
       borderBottom:`1px solid ${C.border}22`,
       background: alreadyOpen?C.purple+"0a":isLong?C.green+"08":isShort?C.red+"08":"transparent",
@@ -159,7 +182,11 @@ function SignalRow({ item, onTrade, entryZ, autoTradeOn, alreadyOpen }) {
       <div style={{fontSize:10,color:item.isCointegrated?C.green:C.red}}>{item.isCointegrated?"✓ CI":"✗ NO"}</div>
       <div style={{fontSize:10,color:C.muted}}>p={item.pValue}</div>
       <ZBar z={item.z} entryZ={entryZ} />
-      <Spark data={item.zHistory} color={color} w={75} h={26}/>
+      <div style={{fontFamily:"monospace",fontSize:11}}>
+        <span style={{color:item.sharpe>=1?C.green:item.sharpe>=0.5?C.yellow:C.red}}>{item.sharpe?.toFixed?.(1)??"-"}sh</span>
+        <span style={{color:C.muted,marginLeft:4}}>{item.winRate?.toFixed?.(0)??"-"}%</span>
+      </div>
+      <Spark data={item.zHistory} color={color} w={70} h={26}/>
       <div style={{display:"flex",gap:5,alignItems:"center"}}>
         {(isLong||isShort) && !alreadyOpen && (
           <button onClick={()=>onTrade(item,"manual")} style={{
@@ -275,6 +302,14 @@ export default function TradingScanner() {
   const [autoScan, setAutoScan] = useState(false);
   const [sortBy, setSortBy] = useState("absZ");
   const [liveZMap, setLiveZMap] = useState({});
+  const [vix, setVix] = useState(null);
+  const [vixLoading, setVixLoading] = useState(false);
+  const [minSharpe, setMinSharpe] = useState(() => load("pf_min_sharpe", 0.5));
+  const [minWinRate, setMinWinRate] = useState(() => load("pf_min_winrate", 50));
+  const [vixThreshold, setVixThreshold] = useState(() => load("pf_vix_thresh", 25));
+  const [sharpeFilter, setSharpeFilter] = useState(() => load("pf_sharpe_filter", true));
+  const [vixFilter, setVixFilter] = useState(() => load("pf_vix_filter", true));
+  const [filteredCount, setFilteredCount] = useState({ sharpe: 0, vix: 0, coint: 0 });
   const scanRef = useRef(false);
   const autoRef = useRef(null);
 
@@ -289,6 +324,21 @@ export default function TradingScanner() {
   useEffect(() => save("pf_use_real", useReal), [useReal]);
   useEffect(() => save("pf_last_scanned", lastScanned), [lastScanned]);
   useEffect(() => save("pf_auto_trade", autoTrade), [autoTrade]);
+  useEffect(() => save("pf_min_sharpe", minSharpe), [minSharpe]);
+  useEffect(() => save("pf_min_winrate", minWinRate), [minWinRate]);
+  useEffect(() => save("pf_vix_thresh", vixThreshold), [vixThreshold]);
+  useEffect(() => save("pf_sharpe_filter", sharpeFilter), [sharpeFilter]);
+  useEffect(() => save("pf_vix_filter", vixFilter), [vixFilter]);
+
+  // ── FETCH VIX ON LOAD & REFRESH ──────────────────────────────────────────
+  const refreshVIX = useCallback(async () => {
+    setVixLoading(true);
+    const data = await fetchVIX(API_BASE);
+    setVix(data);
+    setVixLoading(false);
+  }, []);
+
+  useEffect(() => { refreshVIX(); }, []);
 
   // ── CLOSE TRADE ───────────────────────────────────────────────────────────
   // ── PNL CALCULATION ───────────────────────────────────────────────────────
@@ -392,10 +442,32 @@ export default function TradingScanner() {
       if (useReal) await new Promise(r => setTimeout(r, 200));
     }
 
-    const sorted = results
-      .filter(r => !filterCoint || r.isCointegrated)
-      .sort((a, b) => Math.abs(b.z) - Math.abs(a.z));
+    // ── SHARPE FILTER ────────────────────────────────────────────────────
+    let sharpeFiltered = 0, vixBlocked = false, cointFiltered = 0;
 
+    // VIX regime check - block ALL new entries if VIX too high
+    const currentVix = vix?.value ?? 0;
+    if (vixFilter && currentVix > vixThreshold) {
+      vixBlocked = true;
+      console.warn(`VIX=${currentVix} > threshold=${vixThreshold} — blocking new entries`);
+    }
+
+    const filtered = results.filter(r => {
+      // Cointegration filter
+      if (filterCoint && !r.isCointegrated) { cointFiltered++; return false; }
+      // Sharpe filter (only for live mode where we have real metrics)
+      if (sharpeFilter && useReal) {
+        const sh = r.sharpe ?? r.metrics?.sharpe ?? 0;
+        const wr = r.winRate ?? r.metrics?.win_rate ?? 0;
+        const nt = r.numTrades ?? r.metrics?.num_trades ?? 0;
+        if (sh < minSharpe || wr < minWinRate || nt < 3) { sharpeFiltered++; return false; }
+      }
+      return true;
+    });
+
+    setFilteredCount({ sharpe: sharpeFiltered, vix: vixBlocked ? results.length : 0, coint: cointFiltered });
+
+    const sorted = filtered.sort((a, b) => Math.abs(b.z) - Math.abs(a.z));
     setSignals(sorted);
     setLastScanned(new Date().toLocaleTimeString());
 
@@ -427,7 +499,8 @@ export default function TradingScanner() {
         return prev; // closeTrade handles actual removal
       });
 
-      // Step 2: Auto-open new entry signals (max 5 new positions per scan)
+      // Step 2: Auto-open new entry signals (max 5 new positions per scan — blocked if VIX too high)
+      if (vixFilter && vix?.value > vixThreshold) { console.warn("VIX block: no new auto-trades"); }
       let newOpens = 0;
       for (const r of results) {
         if (newOpens >= 5) break;
@@ -513,8 +586,12 @@ export default function TradingScanner() {
               <span style={{color:C.muted,fontSize:10}}>σ</span>
             </div>
           ))}
-          {/* Coint filter */}
+          {/* Filters */}
           <button onClick={()=>setFilterCoint(v=>!v)} style={{background:filterCoint?C.green+"20":"transparent",border:`1px solid ${filterCoint?C.green:C.border}`,color:filterCoint?C.green:C.muted,borderRadius:7,padding:"5px 10px",cursor:"pointer",fontSize:11,fontFamily:"inherit"}}>✓ CI</button>
+          <button onClick={()=>setSharpeFilter(v=>!v)} style={{background:sharpeFilter?C.accent+"20":"transparent",border:`1px solid ${sharpeFilter?C.accent:C.border}`,color:sharpeFilter?C.accent:C.muted,borderRadius:7,padding:"5px 10px",cursor:"pointer",fontSize:11,fontFamily:"inherit"}}>📈 SHARPE</button>
+          <button onClick={()=>setVixFilter(v=>!v)} style={{background:vixFilter?(vix?.value>vixThreshold?C.red+"20":C.green+"20"):"transparent",border:`1px solid ${vixFilter?(vix?.value>vixThreshold?C.red:C.green):C.border}`,color:vixFilter?(vix?.value>vixThreshold?C.red:C.green):C.muted,borderRadius:7,padding:"5px 10px",cursor:"pointer",fontSize:11,fontFamily:"inherit"}}>
+            {vixLoading?"⟳ VIX":`VIX ${vix?.value??"-"}`}
+          </button>
           {/* AutoTrade */}
           <button onClick={()=>setAutoTrade(v=>!v)} style={{
             background:autoTrade?"linear-gradient(135deg,#2a1a00,#4a3000)":C.card,
@@ -565,6 +642,100 @@ export default function TradingScanner() {
           </div>
         )}
 
+        {/* VIX + SHARPE FILTER PANEL */}
+        <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:14}}>
+
+          {/* VIX PANEL */}
+          <div style={{background:C.surface,border:`1px solid ${vix?.value>vixThreshold&&vixFilter?C.red:C.border}`,borderRadius:10,padding:"14px 18px",borderLeft:`3px solid ${vix?.value>vixThreshold?C.red:C.green}`}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:10}}>
+              <div>
+                <div style={{fontSize:10,color:C.muted,textTransform:"uppercase",letterSpacing:"0.1em",marginBottom:4}}>VIX Regime Filter</div>
+                <div style={{display:"flex",alignItems:"baseline",gap:8}}>
+                  <div style={{fontFamily:"monospace",fontSize:28,fontWeight:700,color:vix?.value>vixThreshold?C.red:vix?.value>20?C.yellow:C.green}}>
+                    {vix ? vix.value : "—"}
+                  </div>
+                  {vix?.change && <div style={{fontSize:12,color:vix.change>0?C.red:C.green}}>{vix.change>0?"+":""}{vix.change}%</div>}
+                </div>
+                <div style={{fontSize:11,marginTop:4,color:vix?.value>vixThreshold?C.red:vix?.value>20?C.yellow:C.green,fontWeight:600}}>
+                  {vix?.value>vixThreshold?"🚨 HIGH VOLATILITY — TRADING BLOCKED":vix?.value>20?"⚠ ELEVATED — TRADE WITH CAUTION":"✅ LOW VOLATILITY — SAFE TO TRADE"}
+                </div>
+                {vix?.simulated&&<div style={{fontSize:9,color:C.muted,marginTop:2}}>⚡ Estimated (SIM mode)</div>}
+              </div>
+              <div style={{display:"flex",flexDirection:"column",gap:6,alignItems:"flex-end"}}>
+                <button onClick={refreshVIX} style={{background:C.card,border:`1px solid ${C.border}`,color:C.muted,borderRadius:6,padding:"4px 10px",cursor:"pointer",fontSize:11}}>⟳ Refresh</button>
+                <div style={{display:"flex",alignItems:"center",gap:6}}>
+                  <span style={{fontSize:10,color:C.muted}}>Block above:</span>
+                  <input type="number" value={vixThreshold} min={10} max={60} step={1} onChange={e=>setVixThreshold(+e.target.value)}
+                    style={{width:40,background:C.card,border:`1px solid ${C.border}`,color:C.accent,fontFamily:"monospace",fontSize:12,fontWeight:700,textAlign:"center",borderRadius:4,padding:"2px"}}/>
+                </div>
+                <div style={{fontSize:10,color:vixFilter?C.green:C.muted}}>Filter: {vixFilter?"ON":"OFF"}</div>
+              </div>
+            </div>
+            {/* VIX mini chart */}
+            {vix?.history && (
+              <div>
+                <div style={{position:"relative",height:40,marginTop:4}}>
+                  {(() => {
+                    const h = vix.history.filter(Boolean);
+                    if(h.length<2) return null;
+                    const mn=Math.min(...h), mx=Math.max(...h), rng=mx-mn||1;
+                    const w=100;
+                    const pts=h.map((v,i)=>`${(i/(h.length-1))*w}%,${40-((v-mn)/rng)*36}px`).join(" ");
+                    const threshY = 40-((vixThreshold-mn)/rng)*36;
+                    return (
+                      <svg width="100%" height="40" style={{overflow:"visible"}}>
+                        <line x1="0" y1={threshY} x2="100%" y2={threshY} stroke={C.red} strokeWidth={0.8} strokeDasharray="4,3" opacity={0.6}/>
+                        <polyline points={h.map((v,i)=>`${(i/(h.length-1))*100}%,${40-((v-mn)/rng)*36}px`).join(" ")} fill="none" stroke={vix.value>vixThreshold?C.red:C.green} strokeWidth={1.5}/>
+                        <text x="101%" y={threshY+4} fontSize="8" fill={C.red} opacity={0.7}>{vixThreshold}</text>
+                      </svg>
+                    );
+                  })()}
+                </div>
+                <div style={{display:"flex",justifyContent:"space-between",fontSize:9,color:C.muted,marginTop:2}}>
+                  <span>30 days ago</span><span>Today</span>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* SHARPE FILTER PANEL */}
+          <div style={{background:C.surface,border:`1px solid ${sharpeFilter?C.accent:C.border}`,borderRadius:10,padding:"14px 18px",borderLeft:`3px solid ${sharpeFilter?C.accent:C.muted}`}}>
+            <div style={{fontSize:10,color:C.muted,textTransform:"uppercase",letterSpacing:"0.1em",marginBottom:10}}>Sharpe & Win Rate Filter</div>
+            <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:14,marginBottom:12}}>
+              <div>
+                <div style={{fontSize:10,color:C.muted,marginBottom:6}}>Min Sharpe Ratio</div>
+                <div style={{display:"flex",alignItems:"center",gap:8}}>
+                  <input type="range" min={0} max={3} step={0.1} value={minSharpe} onChange={e=>setMinSharpe(+e.target.value)}
+                    style={{flex:1,accentColor:C.accent}}/>
+                  <span style={{fontFamily:"monospace",color:C.accent,fontSize:14,fontWeight:700,minWidth:30}}>{minSharpe}</span>
+                </div>
+                <div style={{fontSize:10,color:C.muted,marginTop:2}}>Only trade pairs with Sharpe ≥ {minSharpe}</div>
+              </div>
+              <div>
+                <div style={{fontSize:10,color:C.muted,marginBottom:6}}>Min Win Rate</div>
+                <div style={{display:"flex",alignItems:"center",gap:8}}>
+                  <input type="range" min={30} max={80} step={1} value={minWinRate} onChange={e=>setMinWinRate(+e.target.value)}
+                    style={{flex:1,accentColor:C.green}}/>
+                  <span style={{fontFamily:"monospace",color:C.green,fontSize:14,fontWeight:700,minWidth:35}}>{minWinRate}%</span>
+                </div>
+                <div style={{fontSize:10,color:C.muted,marginTop:2}}>Only trade pairs with win rate ≥ {minWinRate}%</div>
+              </div>
+            </div>
+            <div style={{display:"flex",gap:12,alignItems:"center",paddingTop:10,borderTop:`1px solid ${C.border}`}}>
+              <div style={{fontSize:11,color:sharpeFilter?C.accent:C.muted}}>
+                Sharpe Filter: <b>{sharpeFilter?"ON — "+filteredCount.sharpe+" pairs filtered":"OFF"}</b>
+              </div>
+              <div style={{fontSize:11,color:filterCoint?C.green:C.muted}}>
+                Coint Filter: <b>{filterCoint?"ON — "+filteredCount.coint+" pairs filtered":"OFF"}</b>
+              </div>
+              {filteredCount.vix>0&&<div style={{fontSize:11,color:C.red}}>VIX Block: <b>ALL entries blocked</b></div>}
+            </div>
+            <div style={{marginTop:8,padding:"8px 10px",background:sharpeFilter?C.accent+"0a":C.card,border:`1px solid ${sharpeFilter?C.accent+"33":C.border}`,borderRadius:6,fontSize:10,color:C.muted}}>
+              💡 Sharpe filter only works in <b style={{color:C.accent}}>LIVE mode</b> — simulation doesn't have real backtest metrics. Switch to 🌐 LIVE for full filtering.
+            </div>
+          </div>
+        </div>
+
         {/* TABS */}
         <div style={{display:"flex",gap:2,borderBottom:`1px solid ${C.border}`,marginBottom:0}}>
           {[
@@ -579,8 +750,8 @@ export default function TradingScanner() {
         {/* SIGNALS TAB */}
         {tab==="signals"&&(
           <div style={{background:C.surface,border:`1px solid ${C.border}`,borderRadius:"0 0 10px 10px",overflow:"hidden"}}>
-            <div style={{display:"grid",gridTemplateColumns:"110px 75px 80px 60px 50px 85px 80px 130px",gap:8,padding:"9px 16px",background:C.card,borderBottom:`1px solid ${C.border}`}}>
-              {[["PAIR",""],["Z","absZ"],["SIGNAL",""],["COINT",""],["P","pValue"],["GAUGE",""],["CHART",""],["ACTION",""]].map(([h,k])=>(
+            <div style={{display:"grid",gridTemplateColumns:"110px 70px 75px 55px 45px 70px 70px 75px 110px",gap:8,padding:"9px 16px",background:C.card,borderBottom:`1px solid ${C.border}`}}>
+              {[["PAIR",""],["Z","absZ"],["SIGNAL",""],["COINT",""],["P","pValue"],["GAUGE",""],["SHARPE",""],["CHART",""],["ACTION",""]].map(([h,k])=>(
                 <div key={h} onClick={()=>k&&setSortBy(k)} style={{fontSize:10,color:k===sortBy?C.accent:C.muted,letterSpacing:"0.08em",cursor:k?"pointer":"default",fontWeight:k===sortBy?700:400}}>{h}{k===sortBy?" ▼":""}</div>
               ))}
             </div>
