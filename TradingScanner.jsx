@@ -181,8 +181,12 @@ function SignalRow({ item, onTrade, entryZ, autoTradeOn, alreadyOpen }) {
 function OpenTradeRow({ trade, currentZ, onClose, exitZ }) {
   const shouldExit = currentZ !== null && Math.abs(currentZ) <= exitZ;
   const dur = Math.floor((Date.now() - trade.openedAt) / 60000);
-  const spreadMove = currentZ !== null ? (trade.direction==="long" ? trade.entryZ - currentZ : currentZ - trade.entryZ) : 0;
-  const livePnl = +(spreadMove * 2.5).toFixed(2);
+  // LONG: profit when Z rises from negative entry toward 0
+  // SHORT: profit when Z falls from positive entry toward 0
+  const reversion = currentZ !== null
+    ? (trade.direction === "long" ? currentZ - trade.entryZ : trade.entryZ - currentZ)
+    : 0;
+  const livePnl = +(reversion * 1.2).toFixed(2);
   const pnlColor = livePnl >= 0 ? C.green : C.red;
   return (
     <div style={{
@@ -287,14 +291,24 @@ export default function TradingScanner() {
   useEffect(() => save("pf_auto_trade", autoTrade), [autoTrade]);
 
   // ── CLOSE TRADE ───────────────────────────────────────────────────────────
+  // ── PNL CALCULATION ───────────────────────────────────────────────────────
+  // When LONG spread: profit when Z rises back toward 0 (entryZ was negative)
+  // When SHORT spread: profit when Z falls back toward 0 (entryZ was positive)
+  // PnL % = Z reversion × scale factor (1% per 0.4σ reversion)
+  const calcPnl = (direction, entryZval, exitZval) => {
+    const reversion = direction === "long"
+      ? exitZval - entryZval   // long: entered at e.g. -2.5, exit at -0.3 → +2.2σ reversion = profit
+      : entryZval - exitZval;  // short: entered at +2.5, exit at +0.3 → +2.2σ reversion = profit
+    return +(reversion * 1.2).toFixed(2); // ~1.2% per sigma of reversion
+  };
+
   const closeTrade = useCallback((id, currentZ, reason = "Manual") => {
     setOpenTrades(prev => {
       const trade = prev.find(t => t.id === id);
       if (!trade) return prev;
       const dur = Math.floor((Date.now() - trade.openedAt) / 60000);
-      const exitZval = currentZ ?? trade.entryZ * 0.3;
-      const spreadMove = trade.direction === "long" ? trade.entryZ - exitZval : exitZval - trade.entryZ;
-      const pnl = +(spreadMove * 2.5).toFixed(2);
+      const exitZval = currentZ ?? 0;
+      const pnl = calcPnl(trade.direction, trade.entryZ, exitZval);
       const closed = {
         ...trade,
         exitZ: +exitZval.toFixed(3),
@@ -305,7 +319,10 @@ export default function TradingScanner() {
         closeReason: reason,
       };
       setClosedTrades(c => [closed, ...c]);
-      notify(`Trade Closed: ${trade.t1}/${trade.t2}`, `${reason} · PnL: ${pnl>=0?"+":""}${pnl}% · Z=${exitZval}`);
+      notify(
+        `${pnl >= 0 ? "✅" : "❌"} Trade Closed: ${trade.t1}/${trade.t2}`,
+        `${reason} · PnL: ${pnl >= 0 ? "+" : ""}${pnl}% · Z: ${trade.entryZ}→${exitZval.toFixed(2)}`
+      );
       return prev.filter(t => t.id !== id);
     });
   }, []);
@@ -314,16 +331,21 @@ export default function TradingScanner() {
   const openTrade = useCallback((item, source = "manual") => {
     const key = `${item.t1}-${item.t2}`;
     setOpenTrades(prev => {
-      const alreadyOpen = prev.some(t => `${t.t1}-${t.t2}` === key);
+      // Never open same pair twice
+      const alreadyOpen = prev.some(t => `${t.t1}-${t.t2}` === key || `${t.t2}-${t.t1}` === key);
       if (alreadyOpen) return prev;
+      // Only open if Z is still at entry level (prevent stale signals)
+      if (Math.abs(item.z) < entryZ) return prev;
       const direction = item.z <= -entryZ ? "long" : "short";
       const id = `${key}-${Date.now()}`;
-      notify(`Trade Opened: ${item.t1}/${item.t2}`, `${source==="auto"?"🤖 AUTO":"👤 MANUAL"} ${direction.toUpperCase()} · Z=${item.z}σ`);
+      notify(
+        `🔔 Trade Opened: ${item.t1}/${item.t2}`,
+        `${source === "auto" ? "🤖 AUTO" : "👤 MANUAL"} ${direction.toUpperCase()} · Entry Z=${item.z}σ`
+      );
       return [...prev, {
         id, t1: item.t1, t2: item.t2, direction, source,
         entryZ: item.z, entryP1: item.p1, entryP2: item.p2,
-        openedAt: Date.now(),
-        beta: item.beta,
+        openedAt: Date.now(), beta: item.beta,
       }];
     });
     if (source === "manual") setTab("trades");
@@ -349,20 +371,23 @@ export default function TradingScanner() {
             const d = await fetchZ(t1, t2, period);
             return { t1, t2, ...d };
           } else {
+            // Simulated — use stable Z per pair so it doesn't randomly flip
             const z = simZ(t1, t2);
+            const isCoint = Math.abs(z) < 3.5 && Math.random() < 0.45;
             return {
               t1, t2, z,
-              zHistory: Array.from({length:60},(_,k)=>simZ(t1+k,t2+k)*0.7),
-              beta: 0.85 + Math.random()*0.3,
-              pValue: Math.random()<0.4?0.01:Math.random()<0.6?0.05:0.50,
-              isCointegrated: Math.random()<0.45,
-              p1: 50+Math.random()*200, p2: 50+Math.random()*200,
-              metrics: { total_return:(Math.random()-0.4)*20, sharpe:Math.random()*3, win_rate:40+Math.random()*40, num_trades:Math.floor(Math.random()*30)+5 },
+              zHistory: Array.from({length:60},(_,k)=>+(simZ(t1+k,t2+k)*0.6).toFixed(3)),
+              beta: +(0.7 + Math.random()*0.6).toFixed(3),
+              pValue: isCoint ? (Math.random()<0.5?0.01:0.05) : 0.50,
+              isCointegrated: isCoint,
+              p1: +(50+Math.random()*250).toFixed(2),
+              p2: +(50+Math.random()*250).toFixed(2),
+              metrics: { total_return:+(Math.random()*20-5).toFixed(1), sharpe:+(Math.random()*2.5).toFixed(2), win_rate:+(45+Math.random()*35).toFixed(1), num_trades:Math.floor(5+Math.random()*25) },
             };
           }
         })
       );
-      batchResults.forEach(r => { if (r.status==="fulfilled") results.push(r.value); });
+      batchResults.forEach(r => { if (r.status === "fulfilled") results.push(r.value); });
       setProgress(Math.min(i + BATCH, ALL_PAIRS.length));
       if (useReal) await new Promise(r => setTimeout(r, 200));
     }
@@ -374,33 +399,47 @@ export default function TradingScanner() {
     setSignals(sorted);
     setLastScanned(new Date().toLocaleTimeString());
 
-    // Update live Z map for open trades
+    // Build live Z map
     const newZMap = {};
     results.forEach(r => { newZMap[`${r.t1}-${r.t2}`] = r.z; });
     setLiveZMap(newZMap);
 
-    // ── AUTO TRADE LOGIC ─────────────────────────────────────────────────
+    // ── AUTO TRADE LOGIC ──────────────────────────────────────────────────
     if (isAutoTrade || autoTrade) {
-      // 1. Auto-open new signals
-      results.forEach(r => {
-        if (!r.isCointegrated && filterCoint) return;
-        const isEntry = Math.abs(r.z) >= entryZ;
-        if (isEntry) openTrade(r, "auto");
-      });
-
-      // 2. Auto-close positions that hit exit or stop
+      // Step 1: Auto-close FIRST (check existing open trades against new Z values)
       setOpenTrades(prev => {
+        const toClose = [];
         prev.forEach(trade => {
           const currentZ = newZMap[`${trade.t1}-${trade.t2}`];
           if (currentZ === undefined) return;
-          const hitExit = (trade.direction==="long" && currentZ >= -exitZ) ||
-                          (trade.direction==="short" && currentZ <= exitZ);
+          // Correct exit logic:
+          // LONG spread: entered because Z was very negative → exit when Z reverts toward 0
+          // SHORT spread: entered because Z was very positive → exit when Z reverts toward 0
+          const hitExit = trade.direction === "long"
+            ? currentZ >= -exitZ   // Z has risen back toward 0
+            : currentZ <= exitZ;   // Z has fallen back toward 0
           const hitStop = stopZ > 0 && Math.abs(currentZ) >= stopZ;
-          if (hitExit) closeTrade(trade.id, currentZ, "Target Exit");
-          else if (hitStop) closeTrade(trade.id, currentZ, "Stop Loss");
+          if (hitStop) toClose.push({ id: trade.id, z: currentZ, reason: "🛑 Stop Loss" });
+          else if (hitExit) toClose.push({ id: trade.id, z: currentZ, reason: "✅ Target Exit" });
         });
-        return prev;
+        // Process closes
+        toClose.forEach(({ id, z, reason }) => closeTrade(id, z, reason));
+        return prev; // closeTrade handles actual removal
       });
+
+      // Step 2: Auto-open new entry signals (max 5 new positions per scan)
+      let newOpens = 0;
+      for (const r of results) {
+        if (newOpens >= 5) break;
+        if (filterCoint && !r.isCointegrated) continue;
+        if (Math.abs(r.z) < entryZ) continue;
+        const key = `${r.t1}-${r.t2}`;
+        setOpenTrades(prev => {
+          const alreadyOpen = prev.some(t => `${t.t1}-${t.t2}` === key || `${t.t2}-${t.t1}` === key);
+          if (!alreadyOpen) { openTrade(r, "auto"); newOpens++; }
+          return prev;
+        });
+      }
     }
 
     setScanning(false);
