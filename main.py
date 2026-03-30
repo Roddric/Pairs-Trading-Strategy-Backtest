@@ -1,6 +1,5 @@
 """
-PairsForge Backend — FastAPI + yfinance
-Engle-Granger cointegration + Kalman Filter hedge ratio
+PairsForge Backend — FastAPI + yfinance + Alpaca Paper Trading
 """
 
 from fastapi import FastAPI, HTTPException, Query
@@ -10,7 +9,10 @@ import yfinance as yf
 import warnings
 warnings.filterwarnings("ignore")
 
-app = FastAPI(title="PairsForge API", version="1.0.0")
+# Import Alpaca router
+from alpaca_router import router as alpaca_router
+
+app = FastAPI(title="PairsForge API", version="2.0.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -20,7 +22,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ── MATH ──────────────────────────────────────────────────────────────────────
+# Mount Alpaca routes
+app.include_router(alpaca_router)
+
+# ── ALL EXISTING MATH + ROUTES (same as before) ───────────────────────────────
 
 def ols_regression(y, x):
     n = len(y)
@@ -69,7 +74,6 @@ def spread_zscore(log1, log2, alpha_arr, beta_arr, lookback):
 
 def run_backtest(prices1, prices2, dates, lookback, entry_z, exit_z, stop_z, hedge_method):
     log1 = np.log(prices1); log2 = np.log(prices2)
-
     if hedge_method == "kalman":
         beta_arr, alpha_arr = kalman_filter_hedge(log1, log2)
         spread, zscore = spread_zscore(log1, log2, alpha_arr, beta_arr, lookback)
@@ -146,22 +150,16 @@ def run_backtest(prices1, prices2, dates, lookback, entry_z, exit_z, stop_z, hed
         "hedge_method": hedge_method,
     }
 
-# ── ROUTES ────────────────────────────────────────────────────────────────────
-
 @app.get("/health")
 def health():
-    return {"status": "ok", "version": "1.0.0"}
+    return {"status": "ok", "version": "2.0.0", "features": ["backtest", "alpaca-paper"]}
 
 @app.post("/backtest")
 def backtest(
-    ticker1: str = Query(...),
-    ticker2: str = Query(...),
-    period: str = Query("2y"),
-    lookback: int = Query(60),
-    entry_z: float = Query(2.0),
-    exit_z: float = Query(0.5),
-    stop_z: float = Query(3.5),
-    hedge_method: str = Query("kalman"),
+    ticker1: str = Query(...), ticker2: str = Query(...),
+    period: str = Query("2y"), lookback: int = Query(60),
+    entry_z: float = Query(2.0), exit_z: float = Query(0.5),
+    stop_z: float = Query(3.5), hedge_method: str = Query("kalman"),
 ):
     try:
         t1 = yf.download(ticker1, period=period, auto_adjust=True, progress=False)
