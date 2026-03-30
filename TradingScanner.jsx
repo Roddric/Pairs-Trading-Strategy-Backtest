@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
+import AlpacaPanel from "./AlpacaPanel.jsx";
 
 // ── API CONFIG ────────────────────────────────────────────────────────────────
 const API_BASE = typeof import.meta !== "undefined" && import.meta.env?.VITE_API_URL
@@ -310,6 +311,8 @@ export default function TradingScanner() {
   const [sharpeFilter, setSharpeFilter] = useState(() => load("pf_sharpe_filter", true));
   const [vixFilter, setVixFilter] = useState(() => load("pf_vix_filter", true));
   const [filteredCount, setFilteredCount] = useState({ sharpe: 0, vix: 0, coint: 0 });
+  const [showAlpaca, setShowAlpaca] = useState(() => load("pf_show_alpaca", false));
+  const [pendingAlpacaTrade, setPendingAlpacaTrade] = useState(null);
   const scanRef = useRef(false);
   const autoRef = useRef(null);
 
@@ -398,8 +401,18 @@ export default function TradingScanner() {
         openedAt: Date.now(), beta: item.beta,
       }];
     });
-    if (source === "manual") setTab("trades");
-  }, [entryZ]);
+    if (source === "manual") {
+      setTab("trades");
+      // Queue for Alpaca if panel is open
+      if (showAlpaca) {
+        setPendingAlpacaTrade({
+          t1: item.t1, t2: item.t2,
+          direction: item.z <= -entryZ ? "long" : "short",
+          entryZ: item.z, beta: item.beta,
+        });
+      }
+    }
+  }, [entryZ, showAlpaca]);
 
   // ── SCAN ENGINE ───────────────────────────────────────────────────────────
   const runScan = useCallback(async (isAutoTrade = false) => {
@@ -605,6 +618,9 @@ export default function TradingScanner() {
             ? <button onClick={stopScan} style={{background:C.red+"20",border:`1px solid ${C.red}44`,color:C.red,borderRadius:7,padding:"6px 14px",cursor:"pointer",fontFamily:"'Bebas Neue',sans-serif",fontSize:13,letterSpacing:"0.08em"}}>■ STOP</button>
             : <button onClick={()=>runScan(autoTrade)} style={{background:"linear-gradient(135deg,#004466,#006688)",border:`1px solid ${C.accent}44`,color:C.accent,borderRadius:7,padding:"6px 16px",cursor:"pointer",fontFamily:"'Bebas Neue',sans-serif",fontSize:13,letterSpacing:"0.08em",boxShadow:`0 0 14px ${C.accent}22`}}>▶ SCAN 250</button>
           }
+          <button onClick={()=>setShowAlpaca(v=>!v)} style={{background:showAlpaca?"linear-gradient(135deg,#2a2000,#4a3800)":"transparent",border:`1px solid ${showAlpaca?C.yellow:C.border}`,color:showAlpaca?C.yellow:C.muted,borderRadius:7,padding:"6px 12px",cursor:"pointer",fontSize:11,fontFamily:"inherit",fontWeight:showAlpaca?700:400}}>
+            📄 {showAlpaca?"ALPACA ON":"ALPACA"}
+          </button>
           <a href="/" style={{background:C.surface,border:`1px solid ${C.border}`,color:C.muted,borderRadius:7,padding:"6px 12px",fontSize:11,textDecoration:"none"}}>← BACK</a>
         </div>
       </div>
@@ -613,6 +629,16 @@ export default function TradingScanner() {
       {scanning&&<div style={{height:3,background:C.border}}><div style={{height:"100%",background:`linear-gradient(90deg,${C.accent},${C.green})`,width:`${(progress/Math.max(total,1))*100}%`,transition:"width 0.3s"}}/></div>}
 
       <div style={{maxWidth:1500,margin:"0 auto",padding:"18px 18px"}}>
+
+        {/* ALPACA PANEL */}
+        {showAlpaca && (
+          <div style={{marginBottom:16}}>
+            <AlpacaPanel
+              pendingTrade={pendingAlpacaTrade}
+              onTradeExecuted={() => setPendingAlpacaTrade(null)}
+            />
+          </div>
+        )}
 
         {/* STATS */}
         <div style={{display:"grid",gridTemplateColumns:"repeat(7,1fr)",gap:9,marginBottom:18}}>
